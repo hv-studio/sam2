@@ -8,8 +8,8 @@ import os
 from setuptools import find_packages, setup
 
 # Package metadata
-NAME = "SAM-2"
-VERSION = "1.0"
+NAME = "sam2"
+VERSION = "1.0.1"
 DESCRIPTION = "SAM 2: Segment Anything in Images and Videos"
 URL = "https://github.com/facebookresearch/sam2"
 AUTHOR = "Meta AI"
