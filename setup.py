@@ -9,7 +9,7 @@ from setuptools import find_packages, setup
 
 # Package metadata
 NAME = "sam2"
-VERSION = "1.0.1"
+VERSION = "1.0.2"
 DESCRIPTION = "SAM 2: Segment Anything in Images and Videos"
 URL = "https://github.com/facebookresearch/sam2"
 AUTHOR = "Meta AI"
@@ -164,7 +164,8 @@ setup(
     author=AUTHOR,
     author_email=AUTHOR_EMAIL,
     license=LICENSE,
-    packages=find_packages(exclude="notebooks"),
+    package_dir={"": "."},
+    packages=find_packages(where=".", include=["sam2", "sam2.*"], exclude=("notebooks",)),
     include_package_data=True,
     install_requires=REQUIRED_PACKAGES,
     extras_require=EXTRA_PACKAGES,
