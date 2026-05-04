@@ -69,6 +69,7 @@ class MemoryAttentionLayer(nn.Module):
         if num_k_exclude_rope > 0:
             assert isinstance(self.cross_attn_image, RoPEAttention)
             kwds = {"num_k_exclude_rope": num_k_exclude_rope}
+        key_padding_mask = None if memory_key_padding_mask is None else ~memory_key_padding_mask
 
         # Cross-Attention
         tgt2 = self.norm2(tgt)
@@ -76,7 +77,7 @@ class MemoryAttentionLayer(nn.Module):
             q=tgt2 + query_pos if self.pos_enc_at_cross_attn_queries else tgt2,
             k=memory + pos if self.pos_enc_at_cross_attn_keys else memory,
             v=memory,
-            memory_key_padding_mask=memory_key_padding_mask,
+            key_padding_mask=key_padding_mask,
             **kwds,
         )
         tgt = tgt + self.dropout2(tgt2)

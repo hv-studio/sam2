@@ -17,25 +17,17 @@ from sam2.modeling.sam2_utils import MLP
 
 
 # >>> START PATCH: masked memory attention >>>
-def _memory_key_padding_mask_to_attn_mask(memory_key_padding_mask: Optional[Tensor], q: Tensor) -> Optional[Tensor]:
-    if memory_key_padding_mask is None:
+def _key_padding_mask_to_attn_mask(
+    key_padding_mask: Optional[Tensor], q: Tensor,
+) -> Optional[Tensor]:
+    if key_padding_mask is None:
         return None
-    if memory_key_padding_mask.dtype is not torch.bool:
-        raise AssertionError(
-            "memory_key_padding_mask must be torch.bool when provided"
-        )
-    if memory_key_padding_mask.dim() != 2:
-        raise AssertionError(
-            "memory_key_padding_mask must have shape [B, memory_len]"
-        )
-    # memory_key_padding_mask uses True=valid and False=padding.
-    padding_mask = (~memory_key_padding_mask).to(device=q.device)
     attn_mask = torch.zeros(
-        (padding_mask.shape[0], 1, 1, padding_mask.shape[1]),
+        (key_padding_mask.shape[0], 1, 1, key_padding_mask.shape[1]),
         dtype=q.dtype,
         device=q.device,
     )
-    attn_mask.masked_fill_(padding_mask[:, None, None, :], float("-inf"))
+    attn_mask.masked_fill_(key_padding_mask[:, None, None, :], float("-inf"))
     return attn_mask
 # <<< END PATCH <<<
 
@@ -91,15 +83,20 @@ class TwoWayTransformer(nn.Module):
         image_embedding: Tensor,
         image_pe: Tensor,
         point_embedding: Tensor,
+        point_key_padding_mask: Optional[Tensor] = None,
     ) -> Tuple[Tensor, Tensor]:
         """
         Args:
           image_embedding (torch.Tensor): image to attend to. Should be shape
             B x embedding_dim x h x w for any h and w.
-          image_pe (torch.Tensor): the positional encoding to add to the image. Must
-            have the same shape as image_embedding.
-          point_embedding (torch.Tensor): the embedding to add to the query points.
-            Must have shape B x N_points x embedding_dim for any N_points.
+          image_pe (torch.Tensor): the positional encoding to add to the image.
+            Must have the same shape as image_embedding.
+          point_embedding (torch.Tensor): the token sequence consumed by the
+            two-way transformer. In the SAM mask-decoder path this already
+            includes both output tokens and sparse prompt tokens, with shape
+            B x N_tokens x embedding_dim.
+          point_key_padding_mask (torch.Tensor or none): optional padding mask
+            for `point_embedding`, with shape BxN and `True` indicating padding.
 
         Returns:
           torch.Tensor: the processed point_embedding
@@ -121,9 +118,10 @@ class TwoWayTransformer(nn.Module):
                 keys=keys,
                 query_pe=point_embedding,
                 key_pe=image_pe,
+                query_key_padding_mask=point_key_padding_mask,
             )
 
-        # Apply the final attention layer from the points to the image
+        # Apply the final attention layer from the token sequence to the image
         q = queries + point_embedding
         k = keys + image_pe
         attn_out = self.final_attn_token_to_image(q=q, k=k, v=keys)
@@ -178,14 +176,19 @@ class TwoWayAttentionBlock(nn.Module):
         self.skip_first_layer_pe = skip_first_layer_pe
 
     def forward(
-        self, queries: Tensor, keys: Tensor, query_pe: Tensor, key_pe: Tensor
+        self, queries: Tensor, keys: Tensor, query_pe: Tensor, key_pe: Tensor,
+        query_key_padding_mask: Optional[Tensor] = None,
     ) -> Tuple[Tensor, Tensor]:
         # Self attention block
         if self.skip_first_layer_pe:
-            queries = self.self_attn(q=queries, k=queries, v=queries)
+            queries = self.self_attn(
+                q=queries, k=queries, v=queries, key_padding_mask=query_key_padding_mask,
+            )
         else:
             q = queries + query_pe
-            attn_out = self.self_attn(q=q, k=q, v=queries)
+            attn_out = self.self_attn(
+                q=q, k=q, v=queries, key_padding_mask=query_key_padding_mask,
+            )
             queries = queries + attn_out
         queries = self.norm1(queries)
 
@@ -204,7 +207,9 @@ class TwoWayAttentionBlock(nn.Module):
         # Cross attention block, image embedding attending to tokens
         q = queries + query_pe
         k = keys + key_pe
-        attn_out = self.cross_attn_image_to_token(q=k, k=q, v=queries)
+        attn_out = self.cross_attn_image_to_token(
+            q=k, k=q, v=queries, key_padding_mask=query_key_padding_mask,
+        )
         keys = keys + attn_out
         keys = self.norm4(keys)
 
@@ -251,7 +256,9 @@ class Attention(nn.Module):
         x = x.transpose(1, 2)
         return x.reshape(b, n_tokens, n_heads * c_per_head)  # B x N_tokens x C
 
-    def forward(self,q: Tensor,k: Tensor,v: Tensor, memory_key_padding_mask: Optional[Tensor] = None) -> Tensor:
+    def forward(
+        self, q: Tensor, k: Tensor, v: Tensor, key_padding_mask: Optional[Tensor] = None,
+    ) -> Tensor:
         # Input projections
         q = self.q_proj(q)
         k = self.k_proj(k)
@@ -263,7 +270,7 @@ class Attention(nn.Module):
         v = self._separate_heads(v, self.num_heads)
 
         dropout_p = self.dropout_p if self.training else 0.0
-        attn_mask = _memory_key_padding_mask_to_attn_mask(memory_key_padding_mask, q)
+        attn_mask = _key_padding_mask_to_attn_mask(key_padding_mask, q)
         # Attention
         out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, dropout_p=dropout_p)
 
@@ -298,8 +305,8 @@ class RoPEAttention(Attention):
         self.rope_k_repeat = rope_k_repeat
 
     def forward(
-            self, q: Tensor, k: Tensor, v: Tensor, num_k_exclude_rope: int = 0,
-            memory_key_padding_mask: Optional[Tensor] = None,
+        self, q: Tensor, k: Tensor, v: Tensor, num_k_exclude_rope: int = 0,
+        key_padding_mask: Optional[Tensor] = None,
     ) -> Tensor:
         # Input projections
         q = self.q_proj(q)
@@ -328,7 +335,7 @@ class RoPEAttention(Attention):
         )
 
         dropout_p = self.dropout_p if self.training else 0.0
-        attn_mask = _memory_key_padding_mask_to_attn_mask(memory_key_padding_mask, q)
+        attn_mask = _key_padding_mask_to_attn_mask(key_padding_mask, q)
         # Attention
         out = F.scaled_dot_product_attention(
             q, k, v, attn_mask=attn_mask, dropout_p=dropout_p
