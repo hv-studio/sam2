@@ -167,6 +167,12 @@ setup(
     package_dir={"": "."},
     packages=find_packages(where=".", include=["sam2", "sam2.*"], exclude=("notebooks",)),
     include_package_data=True,
+    package_data={
+        "sam2": [
+            "*.yaml",
+            "configs/**/*.yaml",
+        ],
+    },
     install_requires=REQUIRED_PACKAGES,
     extras_require=EXTRA_PACKAGES,
     python_requires=">=3.10.0",
