@@ -8,17 +8,13 @@ import os
 from setuptools import find_packages, setup
 
 # Package metadata
-NAME = "SAM-2"
-VERSION = "1.0"
+NAME = "sam2"
+VERSION = "1.0.0+hvstudio.4"
 DESCRIPTION = "SAM 2: Segment Anything in Images and Videos"
 URL = "https://github.com/facebookresearch/sam2"
 AUTHOR = "Meta AI"
 AUTHOR_EMAIL = "segment-anything@meta.com"
 LICENSE = "Apache 2.0"
-
-# Read the contents of README file
-with open("README.md", "r", encoding="utf-8") as f:
-    LONG_DESCRIPTION = f.read()
 
 # Required dependencies
 REQUIRED_PACKAGES = [
@@ -158,14 +154,19 @@ setup(
     name=NAME,
     version=VERSION,
     description=DESCRIPTION,
-    long_description=LONG_DESCRIPTION,
-    long_description_content_type="text/markdown",
     url=URL,
     author=AUTHOR,
     author_email=AUTHOR_EMAIL,
     license=LICENSE,
-    packages=find_packages(exclude="notebooks"),
+    package_dir={"": "."},
+    packages=find_packages(where=".", include=["sam2", "sam2.*"], exclude=("notebooks",)),
     include_package_data=True,
+    package_data={
+        "sam2": [
+            "*.yaml",
+            "configs/**/*.yaml",
+        ],
+    },
     install_requires=REQUIRED_PACKAGES,
     extras_require=EXTRA_PACKAGES,
     python_requires=">=3.10.0",

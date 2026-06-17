@@ -63,11 +63,13 @@ class MemoryAttentionLayer(nn.Module):
         tgt = tgt + self.dropout1(tgt2)
         return tgt
 
-    def _forward_ca(self, tgt, memory, query_pos, pos, num_k_exclude_rope=0):
+    def _forward_ca(self, tgt, memory, query_pos, pos, num_k_exclude_rope=0,
+                    memory_key_padding_mask: Optional[Tensor] = None):
         kwds = {}
         if num_k_exclude_rope > 0:
             assert isinstance(self.cross_attn_image, RoPEAttention)
             kwds = {"num_k_exclude_rope": num_k_exclude_rope}
+        key_padding_mask = None if memory_key_padding_mask is None else ~memory_key_padding_mask
 
         # Cross-Attention
         tgt2 = self.norm2(tgt)
@@ -75,6 +77,7 @@ class MemoryAttentionLayer(nn.Module):
             q=tgt2 + query_pos if self.pos_enc_at_cross_attn_queries else tgt2,
             k=memory + pos if self.pos_enc_at_cross_attn_keys else memory,
             v=memory,
+            key_padding_mask=key_padding_mask,
             **kwds,
         )
         tgt = tgt + self.dropout2(tgt2)
@@ -87,11 +90,12 @@ class MemoryAttentionLayer(nn.Module):
         pos: Optional[Tensor] = None,
         query_pos: Optional[Tensor] = None,
         num_k_exclude_rope: int = 0,
+        memory_key_padding_mask: Optional[Tensor] = None,
     ) -> torch.Tensor:
 
         # Self-Attn, Cross-Attn
         tgt = self._forward_sa(tgt, query_pos)
-        tgt = self._forward_ca(tgt, memory, query_pos, pos, num_k_exclude_rope)
+        tgt = self._forward_ca(tgt, memory, query_pos, pos, num_k_exclude_rope, memory_key_padding_mask)
         # MLP
         tgt2 = self.norm3(tgt)
         tgt2 = self.linear2(self.dropout(self.activation(self.linear1(tgt2))))
@@ -123,6 +127,7 @@ class MemoryAttention(nn.Module):
         curr_pos: Optional[Tensor] = None,  # pos_enc for self-attention inputs
         memory_pos: Optional[Tensor] = None,  # pos_enc for cross-attention inputs
         num_obj_ptr_tokens: int = 0,  # number of object pointer *tokens*
+        memory_key_padding_mask: Optional[Tensor] = None,  # [B, memory_len], True=valid, False=padding
     ):
         if isinstance(curr, list):
             assert isinstance(curr_pos, list)
@@ -157,6 +162,7 @@ class MemoryAttention(nn.Module):
                 memory=memory,
                 pos=memory_pos,
                 query_pos=curr_pos,
+                memory_key_padding_mask=memory_key_padding_mask,
                 **kwds,
             )
         normed_output = self.norm(output)

@@ -116,6 +116,7 @@ class MaskDecoder(nn.Module):
         multimask_output: bool,
         repeat_image: bool,
         high_res_features: Optional[List[torch.Tensor]] = None,
+        sparse_key_padding_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Predict masks given image and prompt embeddings.
@@ -124,6 +125,9 @@ class MaskDecoder(nn.Module):
           image_embeddings (torch.Tensor): the embeddings from the image encoder
           image_pe (torch.Tensor): positional encoding with the shape of image_embeddings
           sparse_prompt_embeddings (torch.Tensor): the embeddings of the points and boxes
+          sparse_key_padding_mask (torch.Tensor or none): optional
+            padding mask for sparse prompt embeddings, with shape BxN and
+            `True` indicating padding.
           dense_prompt_embeddings (torch.Tensor): the embeddings of the mask inputs
           multimask_output (bool): Whether to return multiple masks or a single
             mask.
@@ -137,6 +141,7 @@ class MaskDecoder(nn.Module):
             image_embeddings=image_embeddings,
             image_pe=image_pe,
             sparse_prompt_embeddings=sparse_prompt_embeddings,
+            sparse_key_padding_mask=sparse_key_padding_mask,
             dense_prompt_embeddings=dense_prompt_embeddings,
             repeat_image=repeat_image,
             high_res_features=high_res_features,
@@ -173,6 +178,7 @@ class MaskDecoder(nn.Module):
         dense_prompt_embeddings: torch.Tensor,
         repeat_image: bool,
         high_res_features: Optional[List[torch.Tensor]] = None,
+        sparse_key_padding_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Predicts masks. See 'forward' for more details."""
         # Concatenate output tokens
@@ -195,6 +201,15 @@ class MaskDecoder(nn.Module):
             sparse_prompt_embeddings.size(0), -1, -1
         )
         tokens = torch.cat((output_tokens, sparse_prompt_embeddings), dim=1)
+        if sparse_key_padding_mask is None:
+            tokens_key_padding_mask = None
+        else:
+            output_tokens_key_padding_mask = torch.zeros(
+                output_tokens.shape[:2], dtype=torch.bool, device=sparse_key_padding_mask.device,
+            )
+            tokens_key_padding_mask = torch.cat(
+                [output_tokens_key_padding_mask, sparse_key_padding_mask], dim=1,
+            )
 
         # Expand per-image data in batch direction to be per-mask
         if repeat_image:
@@ -210,7 +225,7 @@ class MaskDecoder(nn.Module):
         b, c, h, w = src.shape
 
         # Run the transformer
-        hs, src = self.transformer(src, pos_src, tokens)
+        hs, src = self.transformer(src, pos_src, tokens, point_key_padding_mask=tokens_key_padding_mask)
         iou_token_out = hs[:, s, :]
         mask_tokens_out = hs[:, s + 1 : (s + 1 + self.num_mask_tokens), :]
 
