@@ -53,7 +53,10 @@ class MultiScaleAttention(nn.Module):
         self.qkv = nn.Linear(dim, dim_out * 3)
         self.proj = nn.Linear(dim_out, dim_out)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, x: torch.Tensor, *, return_kv: bool = False,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+        """Return the native output, optionally with pre-pooling image K/V."""
         B, H, W, _ = x.shape
         # qkv with shape (B, H * W, 3, nHead, C)
         qkv = self.qkv(x).reshape(B, H * W, 3, self.num_heads, -1)
@@ -78,7 +81,10 @@ class MultiScaleAttention(nn.Module):
 
         x = self.proj(x)
 
-        return x
+        if return_kv:
+            return x, k, v
+        else:
+            return x
 
 
 class MultiScaleBlock(nn.Module):
@@ -131,7 +137,10 @@ class MultiScaleBlock(nn.Module):
         if dim != dim_out:
             self.proj = nn.Linear(dim, dim_out)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, x: torch.Tensor, *, return_kv: bool = False,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+        """Return the complete block output, optionally with valid K/V [B, heads, tokens, dim]."""
         shortcut = x  # B, H, W, C
         x = self.norm1(x)
 
@@ -140,16 +149,29 @@ class MultiScaleBlock(nn.Module):
             shortcut = do_pool(self.proj(x), self.pool)
 
         # Window partition
-        window_size = self.window_size
-        if window_size > 0:
+        h, w = x.shape[1:3]
+        if (window_size := self.window_size) > 0:
             H, W = x.shape[1], x.shape[2]
             x, pad_hw = window_partition(x, window_size)
 
         # Window Attention + Q Pooling (if stage change)
-        x = self.attn(x)
+        if return_kv:
+            x, keys, values = self.attn(x, return_kv=True)
+            if window_size > 0:
+                keys, values = (
+                    window_unpartition(
+                        tokens.reshape(len(tokens), window_size, window_size, -1),
+                        window_size, pad_hw, (h, w),
+                    ).reshape(len(shortcut), h * w, self.attn.num_heads, -1)
+                    for tokens in (keys, values)
+                )
+            keys, values = keys.transpose(1, 2), values.transpose(1, 2)
+        else:
+            x = self.attn(x)
+
         if self.q_stride:
             # Shapes have changed due to Q pooling
-            window_size = self.window_size // self.q_stride[0]
+            window_size //= self.q_stride[0]
             H, W = shortcut.shape[1:3]
 
             pad_h = (window_size - H % window_size) % window_size
@@ -163,7 +185,10 @@ class MultiScaleBlock(nn.Module):
         x = shortcut + self.drop_path(x)
         # MLP
         x = x + self.drop_path(self.mlp(self.norm2(x)))
-        return x
+        if return_kv:
+            return x, keys, values
+        else:
+            return x
 
 
 class Hiera(nn.Module):
@@ -280,23 +305,37 @@ class Hiera(nn.Module):
         pos_embed = pos_embed.permute(0, 2, 3, 1)
         return pos_embed
 
-    def forward(self, x: torch.Tensor) -> List[torch.Tensor]:
+    def forward(
+        self, x: torch.Tensor, *, stream=None,
+    ) -> Union[List[torch.Tensor], Tuple[List[torch.Tensor], List[torch.Tensor]]]:
+        """Return native maps, optionally updating an externally owned K/V stream.
+
+        The stream exposes read_layers, init_state(batch_size), and
+        advance(layer_index, state, keys, values). K/V are absent at unread
+        layers. Without a stream, return native maps as before. With a stream,
+        return maps and corresponding stream states, fine to coarse. The caller controls
+        parameter freezing and gradient mode.
+        """
         x = self.patch_embed(x)
-        # x: (B, H, W, C)
-
-        # Add pos embed
         x = x + self._get_pos_embed(x.shape[1:3])
+        tokens = stream.init_state(x.shape[0]) if stream is not None else None
 
-        outputs = []
+        outputs, states = [], []
         for i, blk in enumerate(self.blocks):
-            x = blk(x)
+            keys, values = None, None
+            if stream is not None and i in stream.read_layers:
+                x, keys, values = blk(x, return_kv=True)
+            else:
+                x = blk(x)
+            if stream is not None:
+                tokens = stream.advance(i, tokens, keys, values)
             if (i == self.stage_ends[-1]) or (
                 i in self.stage_ends and self.return_interm_layers
             ):
-                feats = x.permute(0, 3, 1, 2)
-                outputs.append(feats)
-
-        return outputs
+                outputs.append(x.permute(0, 3, 1, 2))
+                if stream is not None:
+                    states.append(tokens)
+        return outputs if stream is None else (outputs, states)
 
     def get_layer_id(self, layer_name):
         # https://github.com/microsoft/unilm/blob/master/beit/optim_factory.py#L33
